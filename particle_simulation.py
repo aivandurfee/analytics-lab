@@ -12,7 +12,7 @@ START_LAT_MAX = 40.0
 
 print("1. Loading Ocean Currents...")
 try:
-    ds_u = xr.open_dataset('2018_uvel.nc4', engine='h5netcdf')
+    ds_u = xr.open_dataset('2018_uvel.nc4', engine='h5netcdf')  
     ds_v = xr.open_dataset('2018_vvel.nc4', engine='h5netcdf')
 
     # Load data (Index 0 = Day 1)
