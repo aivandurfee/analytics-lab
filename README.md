@@ -49,38 +49,65 @@ pip install -r requirements.txt
 | numpy      | Numerical operations              |
 | matplotlib | Plots and animation               |
 | h5netcdf   | NetCDF4 engine for `.nc4` files   |
+| netcdf4    | OPeNDAP access (remote data)      |
+| pandas     | Time handling for multi-year EDA  |
 
 ---
 
-## Data Requirements
+## Data: Local Files OR OPeNDAP (No Download)
 
-Both scripts expect HYCOM-style ocean current data in the project directory:
+**Option A — OPeNDAP (recommended):** No data download needed. Data streams from HYCOM's THREDDS server. No API key required.
 
-- `2018_uvel.nc4` — Zonal (east–west) velocity component (m/s)
-- `2018_vvel.nc4` — Meridional (north–south) velocity component (m/s)
+- **Newest data:** ESPC-D-V02 (Aug 2024 – Present)
+- **Multi-year:** GOFS 3.1 Reanalysis (1994–2015) for seasonality and trend analysis
 
-**Data format:** NetCDF4 with 2D arrays for `Longitude`, `Latitude`, and a time dimension (e.g., `MT`). Land cells should be NaN.
-
-These large datasets are excluded from the repo via `.gitignore`. Obtain them from HYCOM, Copernicus Marine Service, or your course/institution data source.
+**Option B — Local files:** Place `2018_uvel.nc4` and `2018_vvel.nc4` in the project root (same format as before).
 
 ---
 
 ## Usage
 
-1. Place `2018_uvel.nc4` and `2018_vvel.nc4` in the project root.
-2. Run the Ocean Scanner:
+### 1. Ocean Scanner (EDA)
 
-   ```bash
-   python EDA.py
-   ```
+```bash
+python EDA.py
+```
 
-3. Run the particle simulation:
+Uses local files if present; otherwise falls back to OPeNDAP.
 
-   ```bash
-   python particle_simulation.py
-   ```
+### 2. Particle Simulation (Fast: ~2–3 min)
 
-Both scripts open matplotlib windows. The simulation generates an animation of debris drift over 180 days.
+Uses **river plastic emissions** (Meijer 2021) for starting positions and **2024** ocean data.
+
+```bash
+python particle_simulation.py
+```
+
+- **River sources**: 10,000+ Asia-Pacific rivers, emission-weighted ([Meijer et al. 2021](https://figshare.com/articles/dataset/Supplementary_data_for_More_than_1000_rivers_account_for_80_of_global_riverine_plsatic_emissions_into_the_ocean_/14515590))
+- `"opendap_analysis"` — 2024 data (Dec 2018–Sep 2024), **default**
+- `"opendap_reanalysis"` — 1994–2015 (time-varying, ~30 min)
+- `"local"` — Your `2018_uvel.nc4` / `2018_vvel.nc4` files
+
+### 3. Trend Analysis (2019–2024 Averages, ~5–10 min)
+
+```bash
+python EDA_trends_recent.py
+```
+
+Loads 1 month per year, computes mean speed, plots trends.
+
+### 4. Multi-Year EDA (Seasonality & Trends, 1994–2015)
+
+```bash
+python EDA_multi_year.py
+```
+
+Loads reanalysis data in yearly chunks and produces:
+
+- **Seasonal comparison** — Winter vs summer gyre strength
+- **Year-over-year trend** — Mean current speed by year
+- **Seasonal heatmap** — Speed by year and month
+- **Spatial map** — Mean July speed in the gyre region
 
 ---
 
@@ -97,12 +124,16 @@ This forms **Module 1** of a larger system. The conclusion:
 ## File Structure
 
 ```
-Analytics Lab EDA/
+analytics-lab/
 ├── README.md
 ├── requirements.txt
+├── hycom_data.py           # OPeNDAP data fetcher (no API key)
+├── river_data.py           # River plastic emissions (Meijer 2021)
 ├── EDA.py                  # Ocean Scanner: speed map + vector field
+├── EDA_trends_recent.py    # Trend analysis (2019–2024, ~5–10 min)
+├── EDA_multi_year.py       # Seasonality & trend analysis (1994–2015)
 ├── particle_simulation.py  # Time Machine: Lagrangian particle tracking
 ├── .gitignore              # Excludes *.nc4 (large datasets)
-└── 2018_uvel.nc4           # (local only, not in repo)
-    2018_vvel.nc4           # (local only, not in repo)
+└── 2018_uvel.nc4           # (local only, optional)
+    2018_vvel.nc4           # (local only, optional)
 ```

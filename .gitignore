@@ -1,1 +1,3 @@
 *.nc4
+data/
+__pycache__/
