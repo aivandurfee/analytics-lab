@@ -29,8 +29,12 @@ DATA_SOURCE = "opendap_analysis"
 # QUICK_MODE: 1 snapshot (~2-3 min). False = time-varying (~30 min, can timeout)
 QUICK_MODE = True
 
-# North Pacific bounding box (ocean currents) - extend west to include full Japan (129-145°E)
-BBOX = (120, 220, 20, 50)
+# Save animation to GIF for slides (requires: pip install pillow)
+SAVE_GIF = True
+GIF_FILENAME = "particle_simulation.gif"
+
+# North Pacific bounding box (ocean currents) - extend west to 110°E for full China coast
+BBOX = (110, 220, 15, 50)
 # River region: Asia-Pacific rivers feeding the gyre
 RIVER_BBOX = (100, 180, 0, 55)
 
@@ -126,32 +130,87 @@ else:
     particles_y = np.linspace(START_LAT_MIN, START_LAT_MAX, NUM_PARTICLES)
     print(f"2. Dropping {NUM_PARTICLES} particles in a line east of Japan...")
 
+def nudge_to_ocean(px, py, lon_2d, lat_2d, land_mask):
+    """Move particles that start on land to nearest ocean cell."""
+    ocean = ~land_mask
+    for i in range(len(px)):
+        x, y = px[i], py[i]
+        xi = int(np.clip((np.abs(lon_2d[0, :] - x)).argmin(), 0, lon_2d.shape[1] - 1))
+        yi = int(np.clip((np.abs(lat_2d[:, 0] - y)).argmin(), 0, lon_2d.shape[0] - 1))
+        if yi >= land_mask.shape[0] or xi >= land_mask.shape[1]:
+            continue
+        if land_mask[yi, xi] or not (np.isfinite(lon_2d[yi, xi]) and np.isfinite(lat_2d[yi, xi])):
+            for r in range(1, max(lon_2d.shape)):
+                ylo, yhi = max(0, yi - r), min(lon_2d.shape[0], yi + r + 1)
+                xlo, xhi = max(0, xi - r), min(lon_2d.shape[1], xi + r + 1)
+                patch = ocean[ylo:yhi, xlo:xhi]
+                if np.any(patch):
+                    yy, xx = np.where(patch)
+                    dist = (lat_2d[ylo:yhi, xlo:xhi][yy, xx] - y)**2 + (lon_2d[ylo:yhi, xlo:xhi][yy, xx] - x)**2
+                    j = np.argmin(dist)
+                    px[i] = float(lon_2d[ylo + yy[j], xlo + xx[j]])
+                    py[i] = float(lat_2d[ylo + yy[j], xlo + xx[j]])
+                    break
+
+# Build 2D lon/lat and nudge particles from land to ocean
+if np.ndim(lons) == 1:
+    lon_2d, lat_2d = np.meshgrid(lons, lats)
+else:
+    lon_2d, lat_2d = lons, lats
+land_mask = np.isnan(u_vis)
+nudge_to_ocean(particles_x, particles_y, lon_2d, lat_2d, land_mask)
+print("   Nudged land particles to nearest ocean")
+
 # --- 3. PHYSICS ENGINE ---
-def get_velocity_at_point(x, y, u_grid, v_grid, x_axis, y_axis):
-    """Get velocity at (x,y). If on land (NaN), use nearest ocean cell so particles don't get stuck."""
-    xi = (np.abs(x_axis[0, :] - x)).argmin()
-    yi = (np.abs(y_axis[:, 0] - y)).argmin()
-    u_val = float(u_grid[yi, xi])
-    v_val = float(v_grid[yi, xi])
-    # Land or invalid (HYCOM uses NaN or fill values)
-    invalid = np.isnan(u_val) or np.isnan(v_val) or abs(u_val) > 10 or abs(v_val) > 10
-    if invalid:
-        # On land - find nearest ocean cell so particles keep moving along coast
-        ny, nx = u_grid.shape
-        valid = ~(np.isnan(u_grid) | np.isnan(v_grid))
-        for r in range(1, max(nx, ny)):
-            ylo, yhi = max(0, yi - r), min(ny, yi + r + 1)
-            xlo, xhi = max(0, xi - r), min(nx, xi + r + 1)
-            patch_v = valid[ylo:yhi, xlo:xhi]
-            if np.any(patch_v):
-                yy, xx = np.where(patch_v)
-                yy, xx = yy[0] + ylo, xx[0] + xlo
-                u_val = u_grid[yy, xx]
-                v_val = v_grid[yy, xx]
-                break
-        else:
-            u_val = v_val = 0.0
-    return u_val, v_val
+# When on land: IMMEDIATELY displace to nearest ocean (velocity-based nudge wasn't reliable)
+DISPLACE_DEG = 0.25  # move this many degrees toward ocean when on land (~3 grid cells)
+
+def _nearest_ocean_cell(x, y, x_axis, y_axis, land_mask):
+    """Return (xo, yo) of nearest ocean cell, or None if none found."""
+    xi = int(np.clip((np.abs(x_axis[0, :] - x)).argmin(), 0, x_axis.shape[1] - 1))
+    yi = int(np.clip((np.abs(y_axis[:, 0] - y)).argmin(), 0, y_axis.shape[0] - 1))
+    ocean = ~land_mask
+    ny, nx = land_mask.shape
+    for r in range(0, max(nx, ny)):
+        ylo, yhi = max(0, yi - r), min(ny, yi + r + 1)
+        xlo, xhi = max(0, xi - r), min(nx, xi + r + 1)
+        patch = ocean[ylo:yhi, xlo:xhi]
+        if np.any(patch):
+            yy, xx = np.where(patch)
+            dists = (x_axis[ylo:yhi, xlo:xhi][yy, xx] - x)**2 + (y_axis[ylo:yhi, xlo:xhi][yy, xx] - y)**2
+            j = np.argmin(dists)
+            return float(x_axis[ylo + yy[j], xlo + xx[j]]), float(y_axis[ylo + yy[j], xlo + xx[j]])
+    return None
+
+def _direction_away_from_land(x, y, x_axis, y_axis, land_mask):
+    """When at coast, return (xo, yo) to move toward - direction away from nearest land."""
+    xi = int(np.clip((np.abs(x_axis[0, :] - x)).argmin(), 0, x_axis.shape[1] - 1))
+    yi = int(np.clip((np.abs(y_axis[:, 0] - y)).argmin(), 0, y_axis.shape[0] - 1))
+    ny, nx = land_mask.shape
+    for r in range(1, max(nx, ny)):
+        ylo, yhi = max(0, yi - r), min(ny, yi + r + 1)
+        xlo, xhi = max(0, xi - r), min(nx, xi + r + 1)
+        patch = land_mask[ylo:yhi, xlo:xhi]
+        if np.any(patch):
+            yy, xx = np.where(patch)
+            dists = (x_axis[ylo:yhi, xlo:xhi][yy, xx] - x)**2 + (y_axis[ylo:yhi, xlo:xhi][yy, xx] - y)**2
+            j = np.argmin(dists)
+            xl, yl = float(x_axis[ylo + yy[j], xlo + xx[j]]), float(y_axis[ylo + yy[j], xlo + xx[j]])
+            # Move away from land: target = particle + (particle - land) = 2*particle - land
+            xo = 2 * x - xl
+            yo = 2 * y - yl
+            return xo, yo
+    return None
+
+def get_velocity_at_point(x, y, u_grid, v_grid, x_axis, y_axis, land_mask):
+    """Get velocity at (x,y). If on land, return zero (displacement handled separately)."""
+    xi = int(np.clip((np.abs(x_axis[0, :] - x)).argmin(), 0, x_axis.shape[1] - 1))
+    yi = int(np.clip((np.abs(y_axis[:, 0] - y)).argmin(), 0, y_axis.shape[0] - 1))
+    on_land = land_mask[yi, xi] if (yi < land_mask.shape[0] and xi < land_mask.shape[1]) else False
+    invalid = np.isnan(u_grid[yi, xi]) or np.isnan(v_grid[yi, xi]) or abs(u_grid[yi, xi]) > 10 or abs(v_grid[yi, xi]) > 10
+    if on_land or invalid:
+        return 0.0, 0.0  # Velocity handled by displacement below
+    return float(u_grid[yi, xi]), float(v_grid[yi, xi])
 
 history_x = []
 history_y = []
@@ -193,12 +252,43 @@ for step in range(total_steps):
 
     for i in range(NUM_PARTICLES):
         u_curr, v_curr = get_velocity_at_point(
-            particles_x[i], particles_y[i], u_curr_grid, v_curr_grid, lons, lats
+            particles_x[i], particles_y[i], u_curr_grid, v_curr_grid, lon_2d, lat_2d, land_mask
         )
         dx = u_curr * dt
         dy = v_curr * dt
         particles_x[i] += dx / (meters_per_degree * np.cos(np.radians(particles_y[i])))
         particles_y[i] += dy / meters_per_degree
+
+        # If on land, invalid cell, or adjacent to land (at coast): displace toward ocean
+        xi = int(np.clip((np.abs(lon_2d[0, :] - particles_x[i])).argmin(), 0, lon_2d.shape[1] - 1))
+        yi = int(np.clip((np.abs(lat_2d[:, 0] - particles_y[i])).argmin(), 0, lat_2d.shape[0] - 1))
+        invalid = yi < u_curr_grid.shape[0] and xi < u_curr_grid.shape[1] and (
+            np.isnan(u_curr_grid[yi, xi]) or np.isnan(v_curr_grid[yi, xi]) or
+            abs(u_curr_grid[yi, xi]) > 10 or abs(v_curr_grid[yi, xi]) > 10
+        )
+        on_land = yi < land_mask.shape[0] and xi < land_mask.shape[1] and land_mask[yi, xi]
+        # Also displace if adjacent to land (particle at coast in ocean cell)
+        at_coast = False
+        if not on_land and yi < land_mask.shape[0] and xi < land_mask.shape[1]:
+            for dy in [-1, 0, 1]:
+                for dx in [-1, 0, 1]:
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = yi + dy, xi + dx
+                    if 0 <= ny < land_mask.shape[0] and 0 <= nx < land_mask.shape[1] and land_mask[ny, nx]:
+                        at_coast = True
+                        break
+        if on_land or invalid or at_coast:
+            if at_coast and not on_land:
+                target = _direction_away_from_land(particles_x[i], particles_y[i], lon_2d, lat_2d, land_mask)
+            else:
+                target = _nearest_ocean_cell(particles_x[i], particles_y[i], lon_2d, lat_2d, land_mask)
+            if target is not None:
+                xo, yo = target
+                dist = max(np.sqrt((xo - particles_x[i])**2 + (yo - particles_y[i])**2), 0.01)
+                step_frac = min(DISPLACE_DEG / dist, 1.0)
+                particles_x[i] += step_frac * (xo - particles_x[i])
+                particles_y[i] += step_frac * (yo - particles_y[i])
 
     if step % 4 == 0:
         history_x.append(particles_x.copy())
@@ -211,7 +301,7 @@ print("4. Generating Animation...")
 
 # --- 5. VISUALIZATION ---
 # Pacific only: Japan, gyre, Kuroshio (no cartopy - it keeps resetting to global view)
-MAP_EXTENT = [115, 200, 15, 50]  # lon_min, lon_max, lat_min, lat_max
+MAP_EXTENT = [110, 200, 15, 50]  # lon_min, lon_max, lat_min, lat_max
 
 fig, ax = plt.subplots(figsize=(12, 8))
 ax.set_xlim(*MAP_EXTENT[:2])
@@ -222,11 +312,11 @@ ax.set_facecolor("#E0F0FF")
 
 # Land from HYCOM mask (only in our data region)
 land_mask = np.isnan(u_vis)
-ax.contourf(lons, lats, land_mask.astype(float), levels=[0.5, 1.5], colors=["#D2B48C"], zorder=2)
-ax.contour(lons, lats, land_mask.astype(float), levels=[0.5], colors="black", linewidths=0.5, zorder=3)
+ax.contourf(lon_2d, lat_2d, land_mask.astype(float), levels=[0.5, 1.5], colors=["#D2B48C"], zorder=2)
+ax.contour(lon_2d, lat_2d, land_mask.astype(float), levels=[0.5], colors="black", linewidths=0.5, zorder=3)
 
 quiv_stride = 20
-ax.quiver(lons[::quiv_stride, ::quiv_stride], lats[::quiv_stride, ::quiv_stride],
+ax.quiver(lon_2d[::quiv_stride, ::quiv_stride], lat_2d[::quiv_stride, ::quiv_stride],
           u_vis[::quiv_stride, ::quiv_stride], v_vis[::quiv_stride, ::quiv_stride],
           color="lightgray", alpha=0.6, scale=50, width=0.003, zorder=1)
 scatter = ax.scatter([], [], c="red", s=25, edgecolor="black", zorder=5)
@@ -242,6 +332,18 @@ def update(frame):
     return scatter, title
 
 anim = FuncAnimation(fig, update, frames=len(history_x), interval=50, blit=False)
+
+# Fill window edge-to-edge (remove white margins)
+plt.subplots_adjust(left=0.02, right=0.98, top=0.96, bottom=0.04)
+
+if SAVE_GIF:
+    print("Saving animation to GIF (this may take a minute)...")
+    try:
+        anim.save(GIF_FILENAME, writer="pillow", fps=15)
+        print(f"Saved to {GIF_FILENAME}")
+    except Exception as e:
+        print(f"GIF save failed: {e}")
+        print("Install Pillow: pip install pillow")
 
 print("Done! Check the pop-up window.")
 plt.show()

@@ -10,11 +10,12 @@ Explores:
 
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
 from hycom_data import load_hycom_opendap
 
-# North Pacific region (Japan to Hawaii, includes gyre)
-BBOX = (130, 240, 18, 50)
+# North Pacific region (tighter = less data, avoids OPeNDAP timeout)
+BBOX = (140, 220, 25, 45)
+# Spatial stride: every 2nd point = 4x less data
+STRIDE = 2
 
 # Years to analyze
 YEARS = [1995, 2000, 2005, 2010, 2015]
@@ -22,67 +23,61 @@ YEARS = [1995, 2000, 2005, 2010, 2015]
 # Months for seasonal comparison (Jan, Apr, Jul, Oct)
 SEASONAL_MONTHS = [1, 4, 7, 10]
 
-# Steps per year (3-hourly data; reanalysis has some missing days)
-STEPS_PER_YEAR = 2900  # ~362 days worth
+# Steps per year, per month (3-hourly = 8/day)
+STEPS_PER_YEAR = 2920
+STEPS_PER_MONTH = 248
 
 print("=" * 60)
 print("Multi-Year EDA: Seasonality & Trends")
 print("=" * 60)
 print("\n1. Connecting to HYCOM Reanalysis (1994-2015)...")
-print("   Loading in yearly chunks to manage memory.\n")
+print("   Loading one month at a time to avoid server timeout.\n")
 
 results = {}  # (year, month) -> mean_speed_over_region
 yearly_means = {}
-snapshot_data = None  # For the map plot
+snapshot_data = None
 
 for year in YEARS:
-    # Load one year at a time (avoids loading 22 years into memory)
-    step_start = (year - 1994) * STEPS_PER_YEAR
-    step_end = step_start + STEPS_PER_YEAR
-    time_slice = slice(step_start, min(step_end, 63341))
-
-    print(f"   Loading {year}...")
-    try:
-        ds = load_hycom_opendap(
-            source="reanalysis",
-            time_slice=time_slice,
-            bbox=BBOX,
-            decode_times=True,
-        )
-    except Exception as e:
-        print(f"   Skip {year}: {e}")
-        continue
-
-    times = ds["time"].values
-    time_pd = pd.to_datetime(times)
-
+    year_speeds = []
     for month in SEASONAL_MONTHS:
-        mask = time_pd.month == month
-        if np.sum(mask) < 10:
+        step_start = (year - 1994) * STEPS_PER_YEAR + (month - 1) * STEPS_PER_MONTH
+        step_end = min(step_start + STEPS_PER_MONTH, 63341)
+        if step_end <= step_start:
             continue
-        u = ds["u"].isel(time=mask).values
-        v = ds["v"].isel(time=mask).values
-        speed = np.sqrt(u**2 + v**2)
-        results[(year, month)] = float(np.nanmean(speed))
 
-    # Yearly mean
-    u_all = ds["u"].values
-    v_all = ds["v"].values
-    speed_all = np.sqrt(u_all**2 + v_all**2)
-    yearly_means[year] = float(np.nanmean(speed_all))
+        print(f"   Loading {year} {['Jan','Apr','Jul','Oct'][SEASONAL_MONTHS.index(month)]}...")
+        try:
+            ds = load_hycom_opendap(
+                source="reanalysis",
+                time_slice=slice(step_start, step_end),
+                bbox=BBOX,
+                decode_times=False,
+            )
+            if STRIDE > 1:
+                ds = ds.isel(lon=slice(None, None, STRIDE), lat=slice(None, None, STRIDE))
+            u = ds["u"].values
+            v = ds["v"].values
+            speed = np.sqrt(u**2 + v**2)
+            mean_spd = float(np.nanmean(speed))
+            results[(year, month)] = mean_spd
+            year_speeds.append(mean_spd)
+            if month == 7:
+                snapshot_data = {
+                    "u": np.nanmean(u, axis=0),
+                    "v": np.nanmean(v, axis=0),
+                    "lon": ds["lon"].values,
+                    "lat": ds["lat"].values,
+                    "year": year,
+                }
+            try:
+                ds.close()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"   Skip {year}-{month}: {e}")
 
-    # Keep July snapshot for map (use most recent year we load)
-    mask_jul = time_pd.month == 7
-    if np.any(mask_jul):
-        snapshot_data = {
-            "u": ds["u"].isel(time=mask_jul).mean(dim="time").values,
-            "v": ds["v"].isel(time=mask_jul).mean(dim="time").values,
-            "lon": ds["lon"].values,
-            "lat": ds["lat"].values,
-            "year": year,
-        }
-
-    ds.close()
+    if year_speeds:
+        yearly_means[year] = float(np.mean(year_speeds))
 
 print("\n2. Computing statistics...")
 
